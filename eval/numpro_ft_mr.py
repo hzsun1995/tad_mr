@@ -8,6 +8,8 @@ from typing import List, Optional, Union
 import numpy as np
 import torch
 from PIL import Image
+from PIL import ImageDraw
+from PIL import ImageFont
 from accelerate import Accelerator, DistributedType, InitProcessGroupKwargs
 from accelerate.state import AcceleratorState
 from decord import VideoReader, cpu
@@ -19,6 +21,18 @@ from tqdm import tqdm
 
 from peft import PeftModel
 from datetime import timedelta
+import shutil
+
+
+
+
+
+
+
+import sys
+sys.path.append('/home/sunhaozhou/NumPro')
+
+# charades 数据集 - moment retrieval任务
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -48,6 +62,7 @@ else:
     best_fit_attn_implementation = "eager"
     
     
+# 加载lora权重
 def load_lora(model, lora_path):
     non_lora_trainables_path = os.path.join(lora_path, 'non_lora_trainables.bin')
     if os.path.exists(non_lora_trainables_path):
@@ -60,6 +75,8 @@ def load_lora(model, lora_path):
     return model
 
 
+
+# longva模型本体
 class LongVA:
     """
     LongVA Model
@@ -67,7 +84,7 @@ class LongVA:
 
     def __init__(
         self,
-        pretrained: str = "lmms-lab/LongVA-7B-DPO",
+        pretrained: str = "/home/sunhaozhou/NumPro/pretrained/LongVA-7B-DPO",
         lora_path: Optional[str] = None,
         truncation: Optional[bool] = True,
         device: Optional[str] = "cuda:0",
@@ -123,6 +140,8 @@ class LongVA:
             else get_model_name_from_path(pretrained)
         )
 
+        
+
         self.pretrained = pretrained
         self.token_strategy = token_strategy
         self.max_frames_num = max_frames_num
@@ -136,6 +155,11 @@ class LongVA:
         cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
 
         llava_model_args["overwrite_config"] = overwrite_config
+
+
+
+
+
         try:
             # Try to load the model with the multimodal argument
             self._tokenizer, self._model, self._image_processor, self._max_length = (
@@ -267,6 +291,7 @@ class LongVA:
     def world_size(self):
         return self._world_size
 
+    # 编码器
     def tok_encode(
         self, string: str, left_truncate_len=None, add_special_tokens=None
     ) -> List[int]:
@@ -278,12 +303,14 @@ class LongVA:
             encoding = encoding[-left_truncate_len:]
         return encoding
 
+    # 解码器
     def tok_decode(self, tokens):
         try:
             return self.tokenizer.decode(tokens)
         except:
             return self.tokenizer.decode([tokens])
 
+    # flatten层
     def flatten(self, input):
         new_list = []
         for i in input:
@@ -291,6 +318,8 @@ class LongVA:
                 new_list.append(j)
         return new_list
 
+
+    # 加载视频
     def load_video(self, video_path, max_frames_num):
         if type(video_path) == str:
             vr = VideoReader(video_path, ctx=cpu(0))
@@ -304,7 +333,8 @@ class LongVA:
         spare_frames = vr.get_batch(frame_idx).asnumpy()
         print(f"spare_frames: {spare_frames.shape}")
         return spare_frames  # (frames, height, width, channels)
-    
+
+    # 加载视频，和上一个函数不一样吗？ 
     def load_video_all(self, video_path):
 
         if isinstance(video_path, str):
@@ -331,6 +361,7 @@ class LongVA:
         cv2_vr.release()
         return video_data
 
+    # 生成文本直到遇到特定的停止字符串
     def stream_generate_until(self, requests: dict, gen_kwargs: dict) -> List[str]:
 
         question_input = []
@@ -407,7 +438,7 @@ class LongVA:
         else:
             question = context
 
-        # This is much safer for llama3, as we now have some object type in it
+        # This is much safer for llama3, as we now have object type in it
         if "llama_3" in self.conv_template:
             conv = copy.deepcopy(conv_templates[self.conv_template])
         else:
@@ -521,7 +552,7 @@ class LongVA:
         except Exception as e:
             raise e
            
-
+# 用于在视频帧上添加文本注释 
 def annotate_frame_with_pil(frame, text, position, font_size, color):
     frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(frame)
@@ -553,6 +584,7 @@ def annotate_frame_with_pil(frame, text, position, font_size, color):
     frame = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
     return frame
 
+# 保存注释后的视频
 def annotate_and_save_video(file_path, output_file_path, position, font_size, color):
     try:
         cap = cv2.VideoCapture(file_path)
@@ -568,27 +600,32 @@ def annotate_and_save_video(file_path, output_file_path, position, font_size, co
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_file_path, fourcc, target_fps, (336, 336))
 
-        frame_count = 0
+        # ？
+        frame_count = 0  
+        water_mark_count = 1
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
                 
-            if frame_count % frame_interval == 0:
+            if frame_count % frame_interval == 0: # ？
                 # Resize frame to 336x336
                 frame = cv2.resize(frame, (336, 336))
-                frame = annotate_frame_with_pil(frame, str(frame_count), position, font_size, color)
+                frame = annotate_frame_with_pil(frame, str(water_mark_count), position, font_size, color)
                 out.write(frame)
-                
+
+                water_mark_count += 1
+            
             frame_count += 1
+            
 
         cap.release()
         out.release()
 
     except Exception as e:
         print(f"Error processing video {file_path}: {e}")
-        
-
+         
+# demo演示，如何使用LongVA模型处理视频数据，生成与视频内容相关的文本描述
 def video_demo(model, video_info, data_path, num_sampled_frames, input_format, instruction, position="bottom_right", font_size=40, color="red", temp_dir="temp"):
     visual_path = os.path.join(data_path, video_info["video"])
     
@@ -615,23 +652,44 @@ def video_demo(model, video_info, data_path, num_sampled_frames, input_format, i
             response["response"] = output
     except Exception as e:
         print(e)
-    match = re.search(r'from (\d+) to (\d+)', response['response'], re.IGNORECASE)
+    
+    # 改过
+    match = re.search(r'(\d+).*?(\d+)', response['response'])
     if match:
         response["pred_start"] = int(match.group(1))
         response["pred_end"] = int(match.group(2))
     
+    # match = re.search(r'from (\d+) to (\d+)', response['response'], re.IGNORECASE)
+    # if match:
+    #     response["pred_start"] = int(match.group(1))
+    #     response["pred_end"] = int(match.group(2))
+    
     return response
 
 if __name__ == "__main__":
+    
+    os.environ["NCCL_P2P_DISABLE"] = "1"
+    os.environ["NCCL_IB_DISABLE"] = "1"
+
+    LORA_PATH="checkpoints/longva_7b_dpo_NumPro_FT"
+
+
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_sampled_frames", type=int, default=32)
     parser.add_argument("--videobackend", type=str, default="all")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--data_path", type=str, default="data/charades/videos")
-    parser.add_argument("--save_path", type=str, default="results/charades_numpro_ft.json")
+
+    # parser.add_argument("--data_path", type=str, default="data/charades/videos")
+    parser.add_argument("--data_path", type=str, default="/media/junhuan/f735e2d6-fcde-4053-9be9-15ec61577e6e1/data/charades/Charades_v1/")
+
+    parser.add_argument("--save_path", type=str, default="results/new_charades_numpro_ft.json")
     parser.add_argument("--test_path", type=str, default="data/charades_test.json")
-    parser.add_argument("--model_path", type=str, default="lmms-lab/LongVA-7B-DPO")
+
+    parser.add_argument("--model_path", type=str, default="/home/sunhaozhou/NumPro/pretrained/LongVA-7B-DPO")
+
     parser.add_argument("--input_format", type=str, default="During which frames can we see {}? Answer in the format of 'from x to y'.")
+
     parser.add_argument("--instruction", type=str, default="The red numbers on each frame represent the frame number.")
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--position", type=str, default="bottom_right")
@@ -639,8 +697,10 @@ if __name__ == "__main__":
     parser.add_argument("--color", type=str, default="red")
     parser.add_argument("--temp_dir", type=str, default="temp")
     
-    os.makedirs(args.temp_dir, exist_ok=True)
+    # 解析命令行参数
     args = parser.parse_args()
+
+    # 使用args变量
     videobackend = args.videobackend
     data_path = args.data_path
     model_path = args.model_path
@@ -650,14 +710,30 @@ if __name__ == "__main__":
     position = args.position
     font_size = args.font_size
     color = args.color
+    temp_dir = args.temp_dir  # 使用变量存储temp_dir的值
+
+    # 创建临时目录
+    os.makedirs(args.temp_dir, exist_ok=True)
+    args = parser.parse_args()
+
+
+
+    videobackend = args.videobackend
+    data_path = args.data_path
+    model_path = args.model_path
+    input_format = args.input_format
+    instruction = args.instruction
+    num_sampled_frames = args.num_sampled_frames
+    position = args.position
+    font_size = args.font_size
+    color = args.color
+
     model = LongVA(pretrained=model_path, lora_path=args.lora_path, model_name="llava_qwen", device=args.device, device_map=args.device, video_decode_backend=videobackend)
-    
     testset_path = args.test_path
     save_path = args.save_path
         
     with open(testset_path, 'r') as f:
         video_list = json.load(f)
-    
     responses = []
     if os.path.exists(save_path):
         responses = json.load(open(save_path, 'r'))
@@ -670,4 +746,5 @@ if __name__ == "__main__":
         with open(save_path, 'w') as f:
             json.dump(responses, f, indent=4)
             
+        
     shutil.rmtree(temp_dir)

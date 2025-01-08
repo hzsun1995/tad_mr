@@ -12,11 +12,36 @@ from qwen_vl_utils import process_vision_info
 from PIL import Image, ImageDraw, ImageFont
 import argparse
 
-model = Qwen2VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
-)
 
-processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+# import torch.distributed as dist
+
+# 初始化进程组
+# os.environ['RANK'] = '0'
+# os.environ['WORLD_SIZE'] = '1'
+# os.environ['MASTER_ADDR'] = 'localhost'
+# os.environ['MASTER_PORT'] = '21212'
+
+# local_rank = int(os.environ.get('RANK', 0))  # 确保获取当前进程的 rank
+# torch.cuda.set_device(local_rank)  # 设置当前进程对应的 GPU
+
+
+# dist.init_process_group(backend='nccl')
+
+
+# 加flash-attn
+# model = Qwen2VLForConditionalGeneration.from_pretrained(
+#     "/media/junhuan/f735e2d6-fcde-4053-9be9-15ec61577e6e1/models/qwen2-vl-int4/", torch_dtype="auto", device_map="auto"
+# )
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    "/media/junhuan/f735e2d6-fcde-4053-9be9-15ec61577e6e1/models/qwen2-vl",
+    config="/media/junhuan/f735e2d6-fcde-4053-9be9-15ec61577e6e1/models/qwen2-vl/config.json",  # 使用启用 FlashAttention 的配置
+    torch_dtype="auto",
+    device_map="auto",  # 禁用自动设备映射,
+    attn_implementation="flash_attention_2"
+)
+# model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+
+processor = AutoProcessor.from_pretrained("/media/junhuan/f735e2d6-fcde-4053-9be9-15ec61577e6e1/models/qwen2-vl")
 
 def annotate_frame_with_pil(frame, text, position, font_size, color):
     frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -65,6 +90,7 @@ def annotate_and_save_video(file_path, output_file_path, position, font_size, co
         out = cv2.VideoWriter(output_file_path, fourcc, target_fps, (336, 336))
 
         frame_count = 0
+        water_mark_count = 0
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -72,8 +98,10 @@ def annotate_and_save_video(file_path, output_file_path, position, font_size, co
                 
             if frame_count % frame_interval == 0:
                 frame = cv2.resize(frame, (336, 336))
-                frame = annotate_frame_with_pil(frame, str(frame_count), position, font_size, color)
+                frame = annotate_frame_with_pil(frame, str(water_mark_count), position, font_size, color)
                 out.write(frame)
+
+                water_mark_count += 1
                 
             frame_count += 1
 
@@ -84,7 +112,7 @@ def annotate_and_save_video(file_path, output_file_path, position, font_size, co
         print(f"Error processing video {file_path}: {e}")
 
 def process_video_queries(model, processor, data_path, save_path, input_format, instruction, device="cuda", video_path=None, position='top_right', font_size=80, color='red'):
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp(dir = "/home/sunhaozhou/NumPro")
     try:
         with open(data_path, 'r') as f:
             video_list = json.load(f)
@@ -101,6 +129,7 @@ def process_video_queries(model, processor, data_path, save_path, input_format, 
             
             video_file_path = os.path.join(video_path, video_info["video"])
             annotated_video_path = os.path.join(temp_dir, video_info['video'])
+
             annotate_and_save_video(
                 video_file_path,
                 annotated_video_path,
@@ -127,6 +156,8 @@ def process_video_queries(model, processor, data_path, save_path, input_format, 
             text = processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
+            import pdb
+            pdb.set_trace()
             image_inputs, video_inputs = process_vision_info(messages)
             inputs = processor(
                 text=[text],
@@ -138,6 +169,8 @@ def process_video_queries(model, processor, data_path, save_path, input_format, 
             inputs = inputs.to(device)
 
             generated_ids = model.generate(**inputs, max_new_tokens=128)
+            # generated_ids = model.module.generate(**inputs, max_new_tokens=128)
+
             generated_ids_trimmed = [
                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
             ]
@@ -155,6 +188,7 @@ def process_video_queries(model, processor, data_path, save_path, input_format, 
                 "duration": video_info.get("duration")
             }
             
+            # match正则
             match = re.search(r"from\s*(?:frame\s*)?(\d+)\s*to\s*(?:frame\s*)?(\d+)", response['response'], re.IGNORECASE)
             if match:
                 response["pred_start"] = int(match.group(1))
@@ -165,14 +199,23 @@ def process_video_queries(model, processor, data_path, save_path, input_format, 
                 json.dump(responses, f, indent=4)
 
     finally:
-        shutil.rmtree(temp_dir)
+        # shutil.rmtree(temp_dir)
+        pass
 
 if __name__ == "__main__":
+
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="data/charades_test.json", help="Path to the input JSON file containing video queries.")
-    parser.add_argument("--save_path", type=str, default="results/charades_qwen2_vl_7b.json", help="Path to save the output JSON file with responses.")
-    parser.add_argument("--video_path", type=str, default="data/charades/videos", help="Path to the video file.")
-    parser.add_argument("--input_format", type=str, default="During which frames can we see {}? Answer in the format of 'from x to y'.", help="Input format string for the query.")
+    parser.add_argument("--save_path", type=str, default="results/new_charades_qwen2_vl_7b_1.json", help="Path to save the output JSON file with responses.")
+    
+    parser.add_argument("--video_path", type=str, default="/media/junhuan/f735e2d6-fcde-4053-9be9-15ec61577e6e1/data/charades/Charades_v1/", help="Path to the video file.")
+    # parser.add_argument("--video_path", type=str, default="data/charades/videos", help="Path to the video file.")
+    
+    parser.add_argument("--input_format", 
+                        type=str, 
+                        default="During which frames can we see {}? Answer in the format of 'from x to y'.", help="Input format string for the query.")
+    
     parser.add_argument("--instruction", type=str, default="The red numbers on each frame represent the frame number.", help="Instruction for the model.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on.")
     parser.add_argument("--position", type=str, default="bottom_right", help="Position of the frame number annotation.")

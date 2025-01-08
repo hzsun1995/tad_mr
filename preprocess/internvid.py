@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 # Input and output folder paths
+# https://opendatalab.org.cn/vd-foundation/InternVid-10M-FLT
 input_folders = ['data/internvid/train']
 output_folder = 'data/internvid/videos_0.5FPS_number_red_40_br'
 

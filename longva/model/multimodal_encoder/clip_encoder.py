@@ -37,8 +37,10 @@ class CLIPVisionTower(nn.Module):
             rank0_print("{} is already loaded, `load_model` called again, skipping.".format(self.vision_tower_name))
             return
 
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        # self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
+        # self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        self.image_processor = CLIPImageProcessor.from_pretrained("/home/sunhaozhou/NumPro/pretrained/clip-vit-large-patch14-336")
+        self.vision_tower = CLIPVisionModel.from_pretrained("/home/sunhaozhou/NumPro/pretrained/clip-vit-large-patch14-336", device_map=device_map)
         self.vision_tower.requires_grad_(False)
 
         self.is_loaded = True
